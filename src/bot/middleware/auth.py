@@ -84,10 +84,7 @@ async def auth_middleware(handler: Callable, event: Any, data: Dict[str, Any]) -
 
         # Welcome message for new session
         if event.effective_message:
-            await event.effective_message.reply_text(
-                f"🔓 Welcome! You are now authenticated.\n"
-                f"Session started at {datetime.now(UTC).strftime('%H:%M:%S UTC')}"
-            )
+            await event.effective_message.reply_text("欢迎哥！请问有什么指示")
 
         # Continue to handler
         return await handler(event, data)
