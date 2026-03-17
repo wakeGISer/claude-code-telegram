@@ -41,7 +41,7 @@ def markdown_to_telegram_html(text: str) -> str:
 
     def _make_placeholder(html_content: str) -> str:
         nonlocal placeholder_counter
-        key = f"\x00PH{placeholder_counter}\x00"
+        key = f"\uFDD0PH{placeholder_counter}\uFDD1"
         placeholder_counter += 1
         placeholders.append((key, html_content))
         return key
@@ -71,6 +71,39 @@ def markdown_to_telegram_html(text: str) -> str:
         return _make_placeholder(f"<code>{escaped_code}</code>")
 
     text = re.sub(r"`([^`\n]+)`", _replace_inline_code, text)
+
+    # --- 2.5 Convert markdown tables to preformatted text ---
+    def _replace_table(m: re.Match) -> str:  # type: ignore[type-arg]
+        lines = m.group(0).strip().split("\n")
+        # Filter out separator lines (|---|---|)
+        data_lines = [l for l in lines if not re.match(r"^\s*\|[\s\-:|]+\|\s*$", l)]
+        rows = []
+        for line in data_lines:
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            rows.append(cells)
+        if not rows:
+            return m.group(0)
+        col_count = max(len(r) for r in rows)
+        widths = [0] * col_count
+        for row in rows:
+            for i, cell in enumerate(row):
+                if i < col_count:
+                    widths[i] = max(widths[i], len(cell))
+        formatted = []
+        for row in rows:
+            parts = []
+            for i in range(col_count):
+                cell = row[i] if i < len(row) else ""
+                parts.append(cell.ljust(widths[i]))
+            formatted.append("  ".join(parts))
+        return _make_placeholder("<pre>" + escape_html("\n".join(formatted)) + "</pre>")
+
+    text = re.sub(
+        r"(?:^\|.+\|$\n?){2,}",
+        _replace_table,
+        text,
+        flags=re.MULTILINE,
+    )
 
     # --- 3. HTML-escape remaining text ---
     text = escape_html(text)
