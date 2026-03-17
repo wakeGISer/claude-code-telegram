@@ -175,7 +175,10 @@ class ClaudeSDKManager:
             # Build system prompt, loading CLAUDE.md from working directory if present
             base_prompt = (
                 f"All file operations must stay within {working_directory}. "
-                "Use relative paths."
+                "Use relative paths.\n\n"
+                "回复风格：用中文，简洁直接，像一个靠谱的技术搭档在聊天。"
+                "不要用 emoji 开头，不要说'好的'、'当然可以'之类的废话。"
+                "称呼用户为'哥'。"
             )
             claude_md_path = Path(working_directory) / "CLAUDE.md"
             if claude_md_path.exists():
@@ -210,7 +213,7 @@ class ClaudeSDKManager:
                     "excludedCommands": self.config.sandbox_excluded_commands or [],
                 },
                 system_prompt=base_prompt,
-                setting_sources=["project"],
+                setting_sources=["user", "project"],
                 stderr=_stderr_callback,
             )
 
@@ -466,6 +469,15 @@ class ClaudeSDKManager:
                 text_parts = []
                 tool_calls = []
 
+                logger.debug(
+                    "AssistantMessage content debug",
+                    content_type=type(content).__name__,
+                    is_list=isinstance(content, list),
+                    is_str=isinstance(content, str),
+                    content_repr=repr(content)[:200] if content else "empty",
+                    block_types=[type(b).__name__ for b in content] if isinstance(content, list) else None,
+                )
+
                 if content and isinstance(content, list):
                     for block in content:
                         if isinstance(block, ToolUseBlock):
@@ -478,6 +490,7 @@ class ClaudeSDKManager:
                             )
                         elif hasattr(block, "text"):
                             text_parts.append(block.text)
+                        # else: skip ThinkingBlock, image blocks, etc.
 
                 if text_parts or tool_calls:
                     update = StreamUpdate(
@@ -486,11 +499,12 @@ class ClaudeSDKManager:
                         tool_calls=tool_calls if tool_calls else None,
                     )
                     await stream_callback(update)
-                elif content:
-                    # Fallback for non-list content
+                elif isinstance(content, str):
+                    # Fallback only for actual string content, not list of
+                    # unrecognized blocks (e.g. ThinkingBlock)
                     update = StreamUpdate(
                         type="assistant",
-                        content=str(content),
+                        content=content,
                     )
                     await stream_callback(update)
 

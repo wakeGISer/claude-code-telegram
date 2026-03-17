@@ -49,7 +49,7 @@ async def _format_progress_update(update_obj) -> Optional[str]:
 
     elif update_obj.type == "progress":
         # Handle progress updates
-        progress_text = f"🔄 <b>{update_obj.content or 'Working...'}</b>"
+        progress_text = f"🔄 <b>{update_obj.content or '🚧 干活中...'}</b>"
 
         percentage = update_obj.get_progress_percentage()
         if percentage is not None:
