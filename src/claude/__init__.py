@@ -1,5 +1,6 @@
 """Claude Code integration module."""
 
+from .cli_integration import ClaudeCLIManager
 from .exceptions import (
     ClaudeError,
     ClaudeParsingError,
@@ -25,6 +26,7 @@ __all__ = [
     # Main integration
     "ClaudeIntegration",
     # Core components
+    "ClaudeCLIManager",
     "ClaudeSDKManager",
     "ClaudeResponse",
     "StreamUpdate",

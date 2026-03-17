@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     )
 
     # Claude settings
+    claude_backend: Literal["sdk", "cli"] = Field(
+        "sdk",
+        description=(
+            "Claude integration backend: 'sdk' (claude-agent-sdk) or "
+            "'cli' (subprocess with full skills/MCP/plugins support)"
+        ),
+    )
     claude_binary_path: Optional[str] = Field(
         None, description="Path to Claude CLI binary (deprecated)"
     )

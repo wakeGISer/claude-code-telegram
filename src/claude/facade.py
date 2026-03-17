@@ -12,6 +12,9 @@ from ..config.settings import Settings
 from .sdk_integration import ClaudeResponse, ClaudeSDKManager, StreamUpdate
 from .session import SessionManager
 
+# Type alias for either backend manager
+ClaudeBackendManager = Any
+
 logger = structlog.get_logger()
 
 
@@ -21,12 +24,19 @@ class ClaudeIntegration:
     def __init__(
         self,
         config: Settings,
-        sdk_manager: Optional[ClaudeSDKManager] = None,
+        sdk_manager: Optional[ClaudeBackendManager] = None,
         session_manager: Optional[SessionManager] = None,
     ):
         """Initialize Claude integration facade."""
         self.config = config
-        self.sdk_manager = sdk_manager or ClaudeSDKManager(config)
+        if sdk_manager:
+            self.sdk_manager = sdk_manager
+        elif config.claude_backend == "cli":
+            from .cli_integration import ClaudeCLIManager
+
+            self.sdk_manager = ClaudeCLIManager(config)
+        else:
+            self.sdk_manager = ClaudeSDKManager(config)
         self.session_manager = session_manager
 
     async def run_command(

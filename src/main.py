@@ -140,13 +140,23 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     session_storage = SQLiteSessionStorage(storage.db_manager)
     session_manager = SessionManager(config, session_storage)
 
-    # Create Claude SDK manager and integration facade
-    logger.info("Using Claude Python SDK integration")
-    sdk_manager = ClaudeSDKManager(config, security_validator=security_validator)
+    # Create Claude backend manager and integration facade
+    if config.claude_backend == "cli":
+        from src.claude.cli_integration import ClaudeCLIManager
+
+        logger.info("Using Claude CLI subprocess integration (full skills/MCP)")
+        backend_manager = ClaudeCLIManager(
+            config, security_validator=security_validator
+        )
+    else:
+        logger.info("Using Claude Python SDK integration")
+        backend_manager = ClaudeSDKManager(
+            config, security_validator=security_validator
+        )
 
     claude_integration = ClaudeIntegration(
         config=config,
-        sdk_manager=sdk_manager,
+        sdk_manager=backend_manager,
         session_manager=session_manager,
     )
 
