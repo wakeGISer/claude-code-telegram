@@ -35,7 +35,9 @@ from .utils.draft_streamer import DraftStreamer, generate_draft_id
 from .utils.html_format import escape_html
 from .utils.image_extractor import (
     ImageAttachment,
+    extract_images_from_text,
     should_send_as_photo,
+    strip_image_paths,
     validate_image_path,
 )
 
@@ -157,6 +159,7 @@ class MessageOrchestrator:
         """Enforce strict project-thread routing and load thread-local state."""
         manager = context.bot_data.get("project_threads_manager")
         if manager is None:
+            logger.warning("Thread manager not initialized")
             await self._reject_for_thread_mode(
                 update,
                 "❌ <b>Project Thread Mode Misconfigured</b>\n\n"
@@ -171,6 +174,11 @@ class MessageOrchestrator:
 
         if self.settings.project_threads_mode == "group":
             if chat.id != self.settings.project_threads_chat_id:
+                logger.warning(
+                    "Thread routing: chat_id mismatch",
+                    chat_id=chat.id,
+                    expected=self.settings.project_threads_chat_id,
+                )
                 await self._reject_for_thread_mode(
                     update,
                     manager.guidance_message(mode=self.settings.project_threads_mode),
@@ -178,6 +186,10 @@ class MessageOrchestrator:
                 return False
         else:
             if getattr(chat, "type", "") != "private":
+                logger.warning(
+                    "Thread routing: not private chat",
+                    chat_type=getattr(chat, "type", ""),
+                )
                 await self._reject_for_thread_mode(
                     update,
                     manager.guidance_message(mode=self.settings.project_threads_mode),
@@ -194,6 +206,21 @@ class MessageOrchestrator:
 
         project = await manager.resolve_project(chat.id, message_thread_id)
         if not project:
+            # General topic (thread_id=1) falls back to default directory
+            if message_thread_id == 1:
+                context.user_data["current_directory"] = Path(
+                    self.settings.approved_directory
+                )
+                context.user_data["claude_session_id"] = None
+                context.user_data["_thread_context"] = {
+                    "chat_id": chat.id,
+                    "message_thread_id": message_thread_id,
+                    "state_key": f"{chat.id}:{message_thread_id}",
+                    "project_slug": "__general__",
+                    "project_root": str(self.settings.approved_directory),
+                    "project_name": "General",
+                }
+                return True
             await self._reject_for_thread_mode(
                 update,
                 manager.guidance_message(mode=self.settings.project_threads_mode),
@@ -586,10 +613,10 @@ class MessageOrchestrator:
     ) -> str:
         """Build the progress message text based on activity so far."""
         if not activity_log:
-            return "Working..."
+            return "🚧 干活中..."
 
         elapsed = time.time() - start_time
-        lines: List[str] = [f"Working... ({elapsed:.0f}s)\n"]
+        lines: List[str] = [f"🚧 干活中... ({elapsed:.0f}s)\n"]
 
         for entry in activity_log[-15:]:  # Show last 15 entries max
             kind = entry.get("kind", "tool")
@@ -885,7 +912,7 @@ class MessageOrchestrator:
         await chat.send_action("typing")
 
         verbose_level = self._get_verbose_level(context)
-        progress_msg = await update.message.reply_text("Working...")
+        progress_msg = await update.message.reply_text("🚧 干活中...")
 
         claude_integration = context.bot_data.get("claude_integration")
         if not claude_integration:
@@ -1003,6 +1030,25 @@ class MessageOrchestrator:
         # Use MCP-collected images (from send_image_to_user tool calls)
         images: List[ImageAttachment] = mcp_images
 
+        # Also extract image paths from Claude's response text
+        # (CLI mode generates files via Write/Bash, not MCP send_image_to_user)
+        if success and claude_response:
+            text_images = extract_images_from_text(
+                claude_response.content, self.settings.approved_directory
+            )
+            for img in text_images:
+                if not any(existing.path == img.path for existing in images):
+                    images.append(img)
+
+        # Strip image file paths from response text so users see clean output
+        if images and success and claude_response:
+            cleaned_content = strip_image_paths(claude_response.content, images)
+            if cleaned_content != claude_response.content:
+                from .utils.formatting import ResponseFormatter
+
+                formatter = ResponseFormatter(self.settings)
+                formatted_messages = formatter.format_claude_response(cleaned_content)
+
         # Try to combine text + images in one message when possible
         caption_sent = False
         if images and len(formatted_messages) == 1:
@@ -1111,7 +1157,7 @@ class MessageOrchestrator:
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Working...")
+        progress_msg = await update.message.reply_text("🚧 干活中...")
 
         # Try enhanced file handler, fall back to basic
         features = context.bot_data.get("features")
@@ -1213,6 +1259,20 @@ class MessageOrchestrator:
             # Use MCP-collected images (from send_image_to_user tool calls)
             images: List[ImageAttachment] = mcp_images_doc
 
+            # Also extract image paths from Claude's response text
+            text_images = extract_images_from_text(
+                claude_response.content, self.settings.approved_directory
+            )
+            for img in text_images:
+                if not any(existing.path == img.path for existing in images):
+                    images.append(img)
+
+            # Strip image file paths from response text
+            if images:
+                cleaned_content = strip_image_paths(claude_response.content, images)
+                if cleaned_content != claude_response.content:
+                    formatted_messages = formatter.format_claude_response(cleaned_content)
+
             caption_sent = False
             if images and len(formatted_messages) == 1:
                 msg = formatted_messages[0]
@@ -1274,7 +1334,7 @@ class MessageOrchestrator:
 
         chat = update.message.chat
         await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Working...")
+        progress_msg = await update.message.reply_text("🚧 干活中...")
 
         try:
             photo = update.message.photo[-1]
@@ -1321,7 +1381,7 @@ class MessageOrchestrator:
                 voice, update.message.caption
             )
 
-            await progress_msg.edit_text("Working...")
+            await progress_msg.edit_text("🚧 干活中...")
             await self._handle_agentic_media_message(
                 update=update,
                 context=context,
@@ -1411,6 +1471,20 @@ class MessageOrchestrator:
 
         # Use MCP-collected images (from send_image_to_user tool calls).
         images: List[ImageAttachment] = mcp_images_media
+
+        # Also extract image paths from Claude's response text
+        text_images = extract_images_from_text(
+            claude_response.content, self.settings.approved_directory
+        )
+        for img in text_images:
+            if not any(existing.path == img.path for existing in images):
+                images.append(img)
+
+        # Strip image file paths from response text
+        if images:
+            cleaned_content = strip_image_paths(claude_response.content, images)
+            if cleaned_content != claude_response.content:
+                formatted_messages = formatter.format_claude_response(cleaned_content)
 
         caption_sent = False
         if images and len(formatted_messages) == 1:

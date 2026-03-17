@@ -12,7 +12,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 
 from ..config.settings import Settings
 from ..events.bus import EventBus
-from ..events.types import WebhookEvent
+from ..events.types import AgentResponseEvent, WebhookEvent
 from ..storage.database import DatabaseManager
 from .auth import verify_github_signature, verify_shared_secret
 
@@ -129,6 +129,33 @@ def create_api_app(
         )
 
         return {"status": "accepted", "event_id": event.id}
+
+    @app.post("/notify")
+    async def send_notification(
+        request: Request,
+        authorization: Optional[str] = Header(None),
+    ) -> Dict[str, str]:
+        """Send a message directly to Telegram without Claude processing."""
+        secret = settings.webhook_api_secret
+        if secret and not verify_shared_secret(authorization, secret):
+            raise HTTPException(status_code=401, detail="Invalid authorization")
+
+        payload = await request.json()
+        text = payload.get("text", "")
+        chat_id = payload.get("chat_id", 0)
+        parse_mode = payload.get("parse_mode", "Markdown")
+
+        if not text:
+            raise HTTPException(status_code=400, detail="text is required")
+
+        await event_bus.publish(
+            AgentResponseEvent(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=parse_mode,
+            )
+        )
+        return {"status": "accepted"}
 
     return app
 
