@@ -1,0 +1,10 @@
+projects:
+  - slug: claude-code-telegram
+    name: Claude Code Telegram
+    path: claude-code-telegram
+    enabled: true
+
+  - slug: claude-max-api-proxy
+    name: Claude Max API Proxy
+    path: claude-max-api-proxy
+    enabled: true
