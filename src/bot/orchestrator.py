@@ -334,6 +334,11 @@ class MessageOrchestrator:
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
+            ("task", self.agentic_task),
+            ("tasks", self.agentic_tasks),
+            ("done", self.agentic_done),
+            ("note", self.agentic_note),
+            ("search", self.agentic_search),
             ("restart", command.restart_command),
         ]
         if self.settings.enable_project_threads:
@@ -443,6 +448,11 @@ class MessageOrchestrator:
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
                 BotCommand("repo", "List repos / switch workspace"),
+                BotCommand("task", "Create a task"),
+                BotCommand("tasks", "List open tasks"),
+                BotCommand("done", "Complete a task"),
+                BotCommand("note", "Quick note to Obsidian"),
+                BotCommand("search", "Search knowledge base"),
                 BotCommand("restart", "Restart the bot"),
             ]
             if self.settings.enable_project_threads:
@@ -538,7 +548,7 @@ class MessageOrchestrator:
     async def agentic_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Compact one-line status, no buttons."""
+        """Health dashboard — session, costs, request stats, system."""
         current_dir = context.user_data.get(
             "current_directory", self.settings.approved_directory
         )
@@ -559,9 +569,17 @@ class MessageOrchestrator:
             except Exception:
                 pass
 
-        await update.message.reply_text(
-            f"📂 {dir_display} · Session: {session_status}{cost_str}"
-        )
+        lines = [f"📂 {dir_display} · Session: {session_status}{cost_str}"]
+
+        # Health tracker stats
+        from .health import BotHealthTracker
+
+        health: BotHealthTracker | None = context.bot_data.get("health_tracker")
+        if health:
+            lines.append("")
+            lines.append(health.format_status())
+
+        await update.message.reply_text("\n".join(lines))
 
     def _get_verbose_level(self, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Return effective verbose level: per-user override or global default."""
@@ -696,6 +714,32 @@ class MessageOrchestrator:
 
         return asyncio.create_task(_heartbeat())
 
+    @staticmethod
+    async def _update_progress_periodically(
+        progress_msg: Any,
+        health: Any,
+        interval: float = 60.0,
+    ) -> None:
+        """Edit the progress message periodically for long-running requests."""
+        from .health import BotHealthTracker
+
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                if not isinstance(health, BotHealthTracker):
+                    continue
+                elapsed = health.get_active_elapsed()
+                if elapsed is None:
+                    continue
+                tool = health.get_active_tool() or "processing"
+                text = f"🚧 干活中... ({int(elapsed)}s) — {tool}"
+                try:
+                    await progress_msg.edit_text(text)
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            pass
+
     def _make_stream_callback(
         self,
         verbose_level: int,
@@ -705,6 +749,7 @@ class MessageOrchestrator:
         mcp_images: Optional[List[ImageAttachment]] = None,
         approved_directory: Optional[Path] = None,
         draft_streamer: Optional[DraftStreamer] = None,
+        health_tracker: Any = None,
     ) -> Optional[Callable[[StreamUpdate], Any]]:
         """Create a stream callback for verbose progress updates.
 
@@ -750,6 +795,8 @@ class MessageOrchestrator:
             if update_obj.tool_calls:
                 for tc in update_obj.tool_calls:
                     name = tc.get("name", "unknown")
+                    if health_tracker:
+                        health_tracker.tool_updated(name)
                     detail = self._summarize_tool_input(name, tc.get("input", {}))
                     if verbose_level >= 1:
                         tool_log.append(
@@ -946,6 +993,13 @@ class MessageOrchestrator:
                 throttle_interval=self.settings.stream_draft_interval,
             )
 
+        # Health tracking
+        from .health import BotHealthTracker
+
+        health: BotHealthTracker | None = context.bot_data.get("health_tracker")
+        if health:
+            health.request_started()
+
         on_stream = self._make_stream_callback(
             verbose_level,
             progress_msg,
@@ -954,10 +1008,16 @@ class MessageOrchestrator:
             mcp_images=mcp_images,
             approved_directory=self.settings.approved_directory,
             draft_streamer=draft_streamer,
+            health_tracker=health,
         )
 
         # Independent typing heartbeat — stays alive even with no stream events
         heartbeat = self._start_typing_heartbeat(chat)
+
+        # Long-running progress update task
+        progress_update_task = asyncio.create_task(
+            self._update_progress_periodically(progress_msg, health)
+        )
 
         success = True
         try:
@@ -1014,8 +1074,14 @@ class MessageOrchestrator:
             formatted_messages = [
                 FormattedMessage(_format_error_message(e), parse_mode="HTML")
             ]
+            if health:
+                health.request_finished(success=False, error=str(e))
+        else:
+            if health:
+                health.request_finished(success=True)
         finally:
             heartbeat.cancel()
+            progress_update_task.cancel()
             if draft_streamer:
                 try:
                     await draft_streamer.flush()
@@ -1213,6 +1279,11 @@ class MessageOrchestrator:
         verbose_level = self._get_verbose_level(context)
         tool_log: List[Dict[str, Any]] = []
         mcp_images_doc: List[ImageAttachment] = []
+
+        health_doc = context.bot_data.get("health_tracker")
+        if health_doc:
+            health_doc.request_started()
+
         on_stream = self._make_stream_callback(
             verbose_level,
             progress_msg,
@@ -1220,9 +1291,13 @@ class MessageOrchestrator:
             time.time(),
             mcp_images=mcp_images_doc,
             approved_directory=self.settings.approved_directory,
+            health_tracker=health_doc,
         )
 
         heartbeat = self._start_typing_heartbeat(chat)
+        progress_update_task_doc = asyncio.create_task(
+            self._update_progress_periodically(progress_msg, health_doc)
+        )
         try:
             claude_response = await claude_integration.run_command(
                 prompt=prompt,
@@ -1316,8 +1391,14 @@ class MessageOrchestrator:
 
             await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
             logger.error("Claude file processing failed", error=str(e), user_id=user_id)
+            if health_doc:
+                health_doc.request_finished(success=False, error=str(e))
+        else:
+            if health_doc:
+                health_doc.request_finished(success=True)
         finally:
             heartbeat.cancel()
+            progress_update_task_doc.cancel()
 
     async def agentic_photo(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1426,6 +1507,11 @@ class MessageOrchestrator:
         verbose_level = self._get_verbose_level(context)
         tool_log: List[Dict[str, Any]] = []
         mcp_images_media: List[ImageAttachment] = []
+
+        health_media = context.bot_data.get("health_tracker")
+        if health_media:
+            health_media.request_started()
+
         on_stream = self._make_stream_callback(
             verbose_level,
             progress_msg,
@@ -1433,6 +1519,7 @@ class MessageOrchestrator:
             time.time(),
             mcp_images=mcp_images_media,
             approved_directory=self.settings.approved_directory,
+            health_tracker=health_media,
         )
 
         heartbeat = self._start_typing_heartbeat(chat)
@@ -1445,6 +1532,12 @@ class MessageOrchestrator:
                 on_stream=on_stream,
                 force_new=force_new,
             )
+            if health_media:
+                health_media.request_finished(success=True)
+        except Exception:
+            if health_media:
+                health_media.request_finished(success=False, error="photo processing failed")
+            raise
         finally:
             heartbeat.cancel()
 
@@ -1531,6 +1624,133 @@ class MessageOrchestrator:
             f"Set {self.settings.voice_provider_api_key_env} "
             f"for {self.settings.voice_provider_display_name} and install "
             'voice extras with: pip install "claude-code-telegram[voice]"'
+        )
+
+    # --- Task & Knowledge commands ---
+
+    async def agentic_task(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Create a task: /task <title>."""
+        import uuid
+
+        text = update.message.text or ""
+        title = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
+        if not title:
+            await update.message.reply_text("Usage: /task <title>")
+            return
+
+        from ..storage.models import TaskModel
+
+        task = TaskModel(id=str(uuid.uuid4()), title=title)
+        storage = context.bot_data.get("storage")
+        if storage:
+            await storage.tasks.create(task)
+            await update.message.reply_text(
+                f"✅ Task created [{task.short_id}]: {title}"
+            )
+        else:
+            await update.message.reply_text("Storage not available.")
+
+    async def agentic_tasks(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """List open tasks: /tasks."""
+        storage = context.bot_data.get("storage")
+        if not storage:
+            await update.message.reply_text("Storage not available.")
+            return
+
+        tasks = await storage.tasks.list_by_status("open")
+        if not tasks:
+            await update.message.reply_text("No open tasks.")
+            return
+
+        lines = []
+        for t in tasks:
+            due = f" (due {t.due_date})" if t.due_date else ""
+            lines.append(f"• [{t.short_id}] {t.title}{due}")
+
+        await update.message.reply_text(
+            f"📋 Open tasks ({len(tasks)}):\n\n" + "\n".join(lines)
+        )
+
+    async def agentic_done(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Complete a task: /done <short_id>."""
+        text = update.message.text or ""
+        short_id = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
+        if not short_id:
+            await update.message.reply_text("Usage: /done <task_id>")
+            return
+
+        storage = context.bot_data.get("storage")
+        if not storage:
+            await update.message.reply_text("Storage not available.")
+            return
+
+        task = await storage.tasks.find_by_short_id(short_id)
+        if not task:
+            await update.message.reply_text(f"Task '{short_id}' not found.")
+            return
+
+        success = await storage.tasks.complete(task.id)
+        if success:
+            await update.message.reply_text(f"✅ Done: {task.title}")
+        else:
+            await update.message.reply_text(f"Task '{short_id}' is already done.")
+
+    async def agentic_note(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Quick note to Obsidian: /note <content>."""
+        text = update.message.text or ""
+        content = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
+        if not content:
+            await update.message.reply_text("Usage: /note <content>")
+            return
+
+        if not self.settings.obsidian_vault_path:
+            await update.message.reply_text(
+                "OBSIDIAN_VAULT_PATH not configured."
+            )
+            return
+
+        from ..knowledge.store import KnowledgeStore
+
+        store = KnowledgeStore(self.settings.obsidian_vault_path)
+        path = store.capture(content)
+        await update.message.reply_text(f"📝 Saved to {path.name}")
+
+    async def agentic_search(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Search knowledge base: /search <query>."""
+        text = update.message.text or ""
+        query = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
+        if not query:
+            await update.message.reply_text("Usage: /search <query>")
+            return
+
+        if not self.settings.obsidian_vault_path:
+            await update.message.reply_text(
+                "OBSIDIAN_VAULT_PATH not configured."
+            )
+            return
+
+        from ..knowledge.store import KnowledgeStore
+
+        store = KnowledgeStore(self.settings.obsidian_vault_path)
+        results = store.search(query)
+
+        if not results:
+            await update.message.reply_text(f"No results for '{query}'.")
+            return
+
+        lines = [r.summary() for r in results[:5]]
+        await update.message.reply_text(
+            f"🔍 Found {len(results)} result(s):\n\n" + "\n\n".join(lines)
         )
 
     async def agentic_repo(

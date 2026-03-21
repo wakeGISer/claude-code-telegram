@@ -138,6 +138,38 @@ class Settings(BaseSettings):
         description="Commands that run outside the sandbox (need system access)",
     )
 
+    # Machine identity
+    machine_role: Optional[str] = Field(
+        None,
+        description="Machine role identifier (e.g. 'personal', 'work')",
+    )
+
+    # Knowledge base (Obsidian)
+    obsidian_vault_path: Optional[Path] = Field(
+        None, description="Path to Obsidian vault for note capture and search"
+    )
+
+    # Scheduled briefs
+    enable_daily_brief: bool = Field(
+        False, description="Enable scheduled daily brief"
+    )
+    daily_brief_cron: str = Field(
+        "30 7 * * *", description="Cron expression for daily brief (default 7:30am)"
+    )
+    daily_brief_chat_id: Optional[int] = Field(
+        None, description="Telegram chat ID for daily brief delivery"
+    )
+    enable_weekly_review: bool = Field(
+        False, description="Enable scheduled weekly review"
+    )
+    weekly_review_cron: str = Field(
+        "0 18 * * 5",
+        description="Cron expression for weekly review (default Friday 18:00)",
+    )
+    weekly_review_chat_id: Optional[int] = Field(
+        None, description="Telegram chat ID for weekly review delivery"
+    )
+
     # Rate limiting
     rate_limit_requests: int = Field(
         DEFAULT_RATE_LIMIT_REQUESTS, description="Requests per window"

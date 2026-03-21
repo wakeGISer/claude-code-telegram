@@ -14,6 +14,7 @@ from .models import (
     AuditLogModel,
     MessageModel,
     SessionModel,
+    TaskModel,
     ToolUsageModel,
     UserModel,
 )
@@ -24,6 +25,7 @@ from .repositories import (
     MessageRepository,
     ProjectThreadRepository,
     SessionRepository,
+    TaskRepository,
     ToolUsageRepository,
     UserRepository,
 )
@@ -45,6 +47,7 @@ class Storage:
         self.audit = AuditLogRepository(self.db_manager)
         self.costs = CostTrackingRepository(self.db_manager)
         self.analytics = AnalyticsRepository(self.db_manager)
+        self.tasks = TaskRepository(self.db_manager)
 
     async def initialize(self):
         """Initialize storage system."""

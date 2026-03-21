@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import logging
+import logging.handlers
 import signal
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ import structlog
 
 from src import __version__
 from src.bot.core import ClaudeCodeBot
+from src.bot.health import BotHealthTracker
 from src.claude import (
     ClaudeIntegration,
     SessionManager,
@@ -39,16 +41,32 @@ from src.storage.facade import Storage
 from src.storage.session_storage import SQLiteSessionStorage
 
 
-def setup_logging(debug: bool = False) -> None:
-    """Configure structured logging."""
+def setup_logging(debug: bool = False, log_file: Optional[str] = None) -> None:
+    """Configure structured logging with optional rotating file output."""
     level = logging.DEBUG if debug else logging.INFO
 
-    # Configure standard logging
-    logging.basicConfig(
-        level=level,
-        format="%(message)s",
-        stream=sys.stdout,
-    )
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    # Console handler (always present)
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(level)
+    console.setFormatter(logging.Formatter("%(message)s"))
+    root.addHandler(console)
+
+    # Rotating file handler (10 MB × 5 files)
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_path,
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(level)
+        file_handler.setFormatter(logging.Formatter("%(message)s"))
+        root.addHandler(file_handler)
 
     # Configure structlog
     structlog.configure(
@@ -88,6 +106,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
     parser.add_argument("--config-file", type=Path, help="Path to configuration file")
+
+    parser.add_argument(
+        "--log-file", type=str, help="Path to log file (enables rotating file logging)"
+    )
 
     return parser.parse_args()
 
@@ -181,6 +203,8 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     agent_handler.register()
 
     # Create bot with all dependencies
+    health_tracker = BotHealthTracker()
+
     dependencies = {
         "auth_manager": auth_manager,
         "security_validator": security_validator,
@@ -189,6 +213,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         "claude_integration": claude_integration,
         "storage": storage,
         "event_bus": event_bus,
+        "health_tracker": health_tracker,
         "project_registry": None,
         "project_threads_manager": None,
     }
@@ -379,7 +404,7 @@ async def run_application(app: Dict[str, Any]) -> None:
 async def main() -> None:
     """Main application entry point."""
     args = parse_args()
-    setup_logging(debug=args.debug)
+    setup_logging(debug=args.debug, log_file=args.log_file)
 
     logger = structlog.get_logger()
     logger.info("Starting Claude Code Telegram Bot", version=__version__)

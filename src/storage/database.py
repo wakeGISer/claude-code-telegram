@@ -310,6 +310,26 @@ class DatabaseManager:
                     ON project_threads(project_slug);
                 """,
             ),
+            (
+                5,
+                """
+                -- Task management for personal assistant
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    body TEXT DEFAULT '',
+                    status TEXT DEFAULT 'open',
+                    tags TEXT DEFAULT '[]',
+                    due_date TEXT,
+                    remind_at TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tasks_status
+                    ON tasks(status);
+                """,
+            ),
         ]
 
     async def _init_pool(self):

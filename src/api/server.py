@@ -34,8 +34,12 @@ def create_api_app(
     )
 
     @app.get("/health")
-    async def health_check() -> Dict[str, str]:
-        return {"status": "ok"}
+    async def health_check() -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "status": "ok",
+            "machine_role": settings.machine_role,
+        }
+        return result
 
     @app.post("/webhooks/{provider}")
     async def receive_webhook(

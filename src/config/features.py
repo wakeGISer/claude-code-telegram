@@ -81,6 +81,11 @@ class FeatureFlags:
         return self.settings.mistral_api_key is not None
 
     @property
+    def obsidian_enabled(self) -> bool:
+        """Check if Obsidian knowledge base integration is enabled."""
+        return self.settings.obsidian_vault_path is not None
+
+    @property
     def stream_drafts_enabled(self) -> bool:
         """Check if streaming drafts via sendMessageDraft is enabled."""
         return self.settings.enable_stream_drafts

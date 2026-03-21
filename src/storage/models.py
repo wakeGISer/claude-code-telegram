@@ -311,3 +311,39 @@ class UserTokenModel:
         if not self.expires_at:
             return False
         return datetime.now(UTC) > self.expires_at
+
+
+@dataclass
+class TaskModel:
+    """Task data model for personal task management."""
+
+    id: str
+    title: str
+    body: str = ""
+    status: str = "open"
+    tags: str = "[]"
+    due_date: Optional[str] = None
+    remind_at: Optional[str] = None
+    created_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+    @property
+    def short_id(self) -> str:
+        """First 6 chars of UUID for display."""
+        return self.id[:6]
+
+    @property
+    def tag_list(self) -> list[str]:
+        """Parse tags JSON string."""
+        try:
+            return json.loads(self.tags)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @classmethod
+    def from_row(cls, row: aiosqlite.Row) -> "TaskModel":
+        """Create from database row."""
+        data = dict(row)
+        for field in ["created_at", "completed_at"]:
+            data[field] = _parse_datetime(data.get(field))
+        return cls(**data)

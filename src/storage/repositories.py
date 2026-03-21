@@ -19,6 +19,7 @@ from .models import (
     MessageModel,
     ProjectThreadModel,
     SessionModel,
+    TaskModel,
     ToolUsageModel,
     UserModel,
 )
@@ -829,3 +830,61 @@ class AnalyticsRepository:
                 "tool_stats": tool_stats,
                 "daily_activity": daily_activity,
             }
+
+
+class TaskRepository:
+    """Task data access for personal task management."""
+
+    def __init__(self, db_manager: DatabaseManager) -> None:
+        self.db = db_manager
+
+    async def create(self, task: TaskModel) -> None:
+        """Insert a new task."""
+        async with self.db.get_connection() as conn:
+            await conn.execute(
+                """INSERT INTO tasks
+                   (id, title, body, status, tags, due_date, remind_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    task.id,
+                    task.title,
+                    task.body,
+                    task.status,
+                    task.tags,
+                    task.due_date,
+                    task.remind_at,
+                    task.created_at or datetime.now(UTC),
+                ),
+            )
+            await conn.commit()
+
+    async def list_by_status(self, status: str = "open") -> List[TaskModel]:
+        """List tasks filtered by status."""
+        async with self.db.get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC",
+                (status,),
+            )
+            rows = await cursor.fetchall()
+            return [TaskModel.from_row(row) for row in rows]
+
+    async def find_by_short_id(self, short_id: str) -> Optional[TaskModel]:
+        """Find a task by prefix of its UUID id."""
+        async with self.db.get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM tasks WHERE id LIKE ?",
+                (f"{short_id}%",),
+            )
+            row = await cursor.fetchone()
+            return TaskModel.from_row(row) if row else None
+
+    async def complete(self, task_id: str) -> bool:
+        """Mark a task as done."""
+        async with self.db.get_connection() as conn:
+            cursor = await conn.execute(
+                """UPDATE tasks SET status = 'done', completed_at = ?
+                   WHERE id = ? AND status = 'open'""",
+                (datetime.now(UTC), task_id),
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
