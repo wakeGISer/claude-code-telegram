@@ -195,6 +195,8 @@ class ClaudeCLIManager:
         env = dict(os.environ)
         # Prevent nested-session detection
         env.pop("CLAUDECODE", None)
+        # Inject API key if configured — needed for environments where
+        # CLI can't access macOS Keychain (e.g. launchd services).
         if self.config.anthropic_api_key_str:
             env["ANTHROPIC_API_KEY"] = self.config.anthropic_api_key_str
         return env
@@ -318,12 +320,32 @@ class ClaudeCLIManager:
             is_error = result_event.get("is_error", False)
             sid = result_event.get("session_id", "")
 
+            result_text = result_event.get("result", "")
+            errors_list = result_event.get("errors", [])
+
             # Check for MCP errors
-            if is_error and "mcp" in result_event.get("result", "").lower():
-                raise ClaudeMCPError(f"MCP error: {result_event.get('result', '')}")
+            if is_error and "mcp" in result_text.lower():
+                raise ClaudeMCPError(f"MCP error: {result_text}")
+
+            # Check for session/auth errors that should trigger a retry
+            # as a fresh session (facade catches these and retries).
+            if is_error:
+                _RETRIABLE_PATTERNS = [
+                    "no conversation found",
+                    "not logged in",
+                    "failed to authenticate",
+                ]
+                combined = " ".join(
+                    [result_text] + [str(e) for e in errors_list]
+                ).lower()
+                for pattern in _RETRIABLE_PATTERNS:
+                    if pattern in combined:
+                        raise ClaudeProcessError(
+                            f"CLI error (retriable): {result_text or errors_list}"
+                        )
 
             return ClaudeResponse(
-                content=result_event.get("result", ""),
+                content=result_text,
                 session_id=sid or fallback_session_id or "",
                 cost=result_event.get("total_cost_usd", 0.0),
                 duration_ms=result_event.get("duration_ms", duration_ms),
