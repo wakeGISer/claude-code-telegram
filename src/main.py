@@ -351,6 +351,11 @@ async def run_application(app: Dict[str, Any]) -> None:
             await scheduler.start()
             logger.info("Job scheduler enabled")
 
+            # Register built-in scheduled jobs (daily brief, weekly review)
+            from src.scheduler.builtin_jobs import register_builtin_jobs
+
+            await register_builtin_jobs(scheduler, config)
+
         # Shutdown task
         shutdown_task = asyncio.create_task(shutdown_event.wait())
         tasks.append(shutdown_task)
