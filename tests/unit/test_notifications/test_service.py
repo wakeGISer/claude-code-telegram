@@ -15,17 +15,19 @@ def event_bus() -> EventBus:
 
 
 @pytest.fixture
-def mock_bot() -> AsyncMock:
-    bot = AsyncMock()
-    bot.send_message = AsyncMock()
-    return bot
+def mock_sender() -> AsyncMock:
+    sender = AsyncMock()
+    sender.platform_name = "telegram"
+    sender.send_text = AsyncMock(return_value="1")
+    sender.max_message_length = lambda: 4096
+    return sender
 
 
 @pytest.fixture
-def service(event_bus: EventBus, mock_bot: AsyncMock) -> NotificationService:
+def service(event_bus: EventBus, mock_sender: AsyncMock) -> NotificationService:
     svc = NotificationService(
         event_bus=event_bus,
-        bot=mock_bot,
+        senders={"telegram": mock_sender},
         default_chat_ids=[100, 200],
     )
     svc.register()
@@ -68,28 +70,27 @@ class TestNotificationService:
         text = "A" * 4000 + "\n\n" + "B" * 200
         chunks = service._split_message(text, max_length=4096)
         assert len(chunks) >= 1
-        # All content preserved
         total_len = sum(len(c) for c in chunks)
         assert total_len > 0
 
     def test_split_message_no_boundary(self, service: NotificationService) -> None:
         """Messages without boundaries are hard-split."""
-        text = "A" * 5000  # No newlines or spaces
+        text = "A" * 5000
         chunks = service._split_message(text, max_length=4096)
         assert len(chunks) == 2
         assert len(chunks[0]) == 4096
         assert len(chunks[1]) == 904
 
-    async def test_send_to_telegram(
-        self, service: NotificationService, mock_bot: AsyncMock
+    async def test_send_via_sender(
+        self, service: NotificationService, mock_sender: AsyncMock
     ) -> None:
-        """Messages are sent via the Telegram bot."""
+        """Messages are sent via the platform sender."""
         event = AgentResponseEvent(chat_id=123, text="hello world")
-        await service._rate_limited_send(123, event)
+        await service._rate_limited_send("123", mock_sender, event)
 
-        mock_bot.send_message.assert_called_once()
-        call_kwargs = mock_bot.send_message.call_args.kwargs
-        assert call_kwargs["chat_id"] == 123
+        mock_sender.send_text.assert_called_once()
+        call_kwargs = mock_sender.send_text.call_args.kwargs
+        assert call_kwargs["chat_id"] == "123"
         assert call_kwargs["text"] == "hello world"
 
     async def test_ignores_non_response_events(
@@ -101,3 +102,24 @@ class TestNotificationService:
         event = Event(source="test")
         await service.handle_response(event)
         assert service._send_queue.qsize() == 0
+
+    async def test_from_bot_compat(self, event_bus: EventBus) -> None:
+        """from_bot() classmethod creates a working service."""
+        mock_bot = AsyncMock()
+        svc = NotificationService.from_bot(
+            event_bus=event_bus,
+            bot=mock_bot,
+            default_chat_ids=[100],
+        )
+        assert "telegram" in svc.senders
+        assert svc.default_chat_ids == [100]
+
+    async def test_resolve_sender_fallback(
+        self, service: NotificationService
+    ) -> None:
+        """Unknown platform falls back to first available sender."""
+        event = AgentResponseEvent(chat_id=1, text="test", platform="feishu")
+        sender = service._resolve_sender(event)
+        # Falls back to telegram since feishu sender not registered
+        assert sender is not None
+        assert sender.platform_name == "telegram"

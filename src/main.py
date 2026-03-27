@@ -315,10 +315,45 @@ async def run_application(app: Dict[str, Any]) -> None:
         # Start event bus
         await event_bus.start()
 
-        # Notification service
+        # Build platform senders for NotificationService
+        from src.platforms.telegram.sender import TelegramSender
+
+        senders: Dict[str, Any] = {
+            "telegram": TelegramSender(telegram_bot),
+        }
+
+        # Initialize Feishu adapter if enabled
+        feishu_adapter = None
+        if "feishu" in config.platforms:
+            from src.platforms.feishu.adapter import FeishuAdapter
+            from src.platforms.message_handler import SharedMessageHandler
+
+            shared_handler = SharedMessageHandler(
+                claude_integration=claude_integration,
+                storage=storage,
+                approved_directory=config.approved_directory,
+            )
+
+            async def _feishu_on_message(msg: Any, sender: Any) -> None:
+                if msg.command:
+                    await shared_handler.handle_command(msg, sender)
+                else:
+                    await shared_handler.handle_text(msg, sender)
+
+            feishu_adapter = FeishuAdapter(
+                app_id=config.feishu_app_id or "",
+                app_secret=config.feishu_app_secret_str,
+                on_message=_feishu_on_message,
+                allowed_users=config.feishu_allowed_users,
+            )
+            await feishu_adapter.initialize()
+            senders["feishu"] = feishu_adapter.sender
+            logger.info("Feishu adapter initialized")
+
+        # Notification service (multi-platform)
         notification_service = NotificationService(
             event_bus=event_bus,
-            bot=telegram_bot,
+            senders=senders,
             default_chat_ids=config.notification_chat_ids or [],
         )
         notification_service.register()
@@ -327,9 +362,15 @@ async def run_application(app: Dict[str, Any]) -> None:
         # Collect concurrent tasks
         tasks = []
 
-        # Bot task — use start() which handles its own initialization check
+        # Telegram bot task
         bot_task = asyncio.create_task(bot.start())
         tasks.append(bot_task)
+
+        # Feishu adapter task
+        if feishu_adapter:
+            feishu_task = asyncio.create_task(feishu_adapter.start())
+            tasks.append(feishu_task)
+            logger.info("Feishu adapter started")
 
         # API server (if enabled)
         if features.api_server_enabled:
@@ -394,6 +435,8 @@ async def run_application(app: Dict[str, Any]) -> None:
         try:
             if scheduler:
                 await scheduler.stop()
+            if feishu_adapter:
+                await feishu_adapter.stop()
             if notification_service:
                 await notification_service.stop()
             await event_bus.stop()

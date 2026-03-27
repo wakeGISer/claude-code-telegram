@@ -1,42 +1,58 @@
-"""Notification service for delivering proactive agent responses to Telegram.
+"""Notification service for delivering proactive agent responses.
 
 Subscribes to AgentResponseEvent on the event bus and delivers messages
-through the Telegram bot API with rate limiting (1 msg/sec per chat).
+through the appropriate platform sender with rate limiting.
 """
 
 import asyncio
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import structlog
-from telegram import Bot
-from telegram.constants import ParseMode
-from telegram.error import TelegramError
 
 from ..events.bus import Event, EventBus
 from ..events.types import AgentResponseEvent
+from ..platforms.types import PlatformSender
 
 logger = structlog.get_logger()
 
-# Telegram rate limit: ~30 msgs/sec globally, ~1 msg/sec per chat
+# Default rate limit: ~1 msg/sec per chat
 SEND_INTERVAL_SECONDS = 1.1
 
 
 class NotificationService:
-    """Delivers agent responses to Telegram chats with rate limiting."""
+    """Delivers agent responses to platform chats with rate limiting."""
 
     def __init__(
         self,
         event_bus: EventBus,
-        bot: Bot,
+        senders: Dict[str, PlatformSender],
         default_chat_ids: Optional[List[int]] = None,
     ) -> None:
         self.event_bus = event_bus
-        self.bot = bot
+        self.senders = senders
         self.default_chat_ids = default_chat_ids or []
         self._send_queue: asyncio.Queue[AgentResponseEvent] = asyncio.Queue()
-        self._last_send_per_chat: dict[int, float] = {}
+        self._last_send_per_chat: dict[str, float] = {}
         self._running = False
         self._sender_task: Optional[asyncio.Task[None]] = None
+
+    # Backwards-compatible constructor for existing code that passes bot=
+    @classmethod
+    def from_bot(
+        cls,
+        event_bus: EventBus,
+        bot: object,
+        default_chat_ids: Optional[List[int]] = None,
+    ) -> "NotificationService":
+        """Create from a telegram.Bot for backwards compatibility."""
+        from ..platforms.telegram.sender import TelegramSender
+
+        tg_sender = TelegramSender(bot)  # type: ignore[arg-type]
+        return cls(
+            event_bus=event_bus,
+            senders={"telegram": tg_sender},
+            default_chat_ids=default_chat_ids,
+        )
 
     def register(self) -> None:
         """Subscribe to agent response events."""
@@ -80,8 +96,17 @@ class NotificationService:
                 break
 
             chat_ids = self._resolve_chat_ids(event)
+            sender = self._resolve_sender(event)
+            if not sender:
+                logger.warning(
+                    "No sender for platform",
+                    platform=event.platform,
+                    event_id=event.id,
+                )
+                continue
+
             for chat_id in chat_ids:
-                await self._rate_limited_send(chat_id, event)
+                await self._rate_limited_send(str(chat_id), sender, event)
 
     def _resolve_chat_ids(self, event: AgentResponseEvent) -> List[int]:
         """Determine which chats to send to."""
@@ -89,7 +114,20 @@ class NotificationService:
             return [event.chat_id]
         return list(self.default_chat_ids)
 
-    async def _rate_limited_send(self, chat_id: int, event: AgentResponseEvent) -> None:
+    def _resolve_sender(self, event: AgentResponseEvent) -> Optional[PlatformSender]:
+        """Pick the right sender based on event.platform."""
+        platform = getattr(event, "platform", "telegram")
+        sender = self.senders.get(platform)
+        if sender:
+            return sender
+        # Fallback: use first available sender
+        if self.senders:
+            return next(iter(self.senders.values()))
+        return None
+
+    async def _rate_limited_send(
+        self, chat_id: str, sender: PlatformSender, event: AgentResponseEvent
+    ) -> None:
         """Send message with per-chat rate limiting."""
         loop = asyncio.get_event_loop()
         now = loop.time()
@@ -100,32 +138,33 @@ class NotificationService:
             await asyncio.sleep(wait_time)
 
         try:
-            # Split long messages (Telegram limit: 4096 chars)
             text = event.text
-            chunks = self._split_message(text)
+            max_len = sender.max_message_length()
+            chunks = self._split_message(text, max_len)
 
             for chunk in chunks:
-                await self.bot.send_message(
+                await sender.send_text(
                     chat_id=chat_id,
                     text=chunk,
-                    parse_mode=(ParseMode.HTML if event.parse_mode == "HTML" else None),
+                    parse_mode=event.parse_mode,
                 )
                 self._last_send_per_chat[chat_id] = asyncio.get_event_loop().time()
 
-                # Rate limit between chunks too
                 if len(chunks) > 1:
                     await asyncio.sleep(SEND_INTERVAL_SECONDS)
 
             logger.info(
                 "Notification sent",
+                platform=sender.platform_name,
                 chat_id=chat_id,
                 text_length=len(text),
                 chunks=len(chunks),
                 originating_event=event.originating_event_id,
             )
-        except TelegramError as e:
+        except Exception as e:
             logger.error(
                 "Failed to send notification",
+                platform=sender.platform_name,
                 chat_id=chat_id,
                 error=str(e),
                 event_id=event.id,
@@ -142,16 +181,12 @@ class NotificationService:
                 chunks.append(text)
                 break
 
-            # Try to split at a paragraph boundary
             split_pos = text.rfind("\n\n", 0, max_length)
             if split_pos == -1:
-                # Try single newline
                 split_pos = text.rfind("\n", 0, max_length)
             if split_pos == -1:
-                # Try space
                 split_pos = text.rfind(" ", 0, max_length)
             if split_pos == -1:
-                # Hard split
                 split_pos = max_length
 
             chunks.append(text[:split_pos])

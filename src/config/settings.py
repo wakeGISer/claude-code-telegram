@@ -33,11 +33,33 @@ from src.utils.constants import (
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    # Bot settings
-    telegram_bot_token: SecretStr = Field(
-        ..., description="Telegram bot token from BotFather"
+    # Platform selection
+    platforms: List[str] = Field(
+        default=["telegram"],
+        description="Active platforms: telegram, feishu (comma-separated)",
     )
-    telegram_bot_username: str = Field(..., description="Bot username without @")
+
+    # Telegram settings (required when 'telegram' in platforms)
+    telegram_bot_token: Optional[SecretStr] = Field(
+        None, description="Telegram bot token from BotFather"
+    )
+    telegram_bot_username: Optional[str] = Field(
+        None, description="Bot username without @"
+    )
+
+    # Feishu settings (required when 'feishu' in platforms)
+    feishu_app_id: Optional[str] = Field(
+        None, description="Feishu app ID for Bot identity and lark-oapi client"
+    )
+    feishu_app_secret: Optional[SecretStr] = Field(
+        None, description="Feishu app secret"
+    )
+    feishu_allowed_users: Optional[List[str]] = Field(
+        None, description="Allowed Feishu open_ids (comma-separated)"
+    )
+    feishu_chat_id: Optional[str] = Field(
+        None, description="Default Feishu chat_id for notifications"
+    )
 
     # Security
     approved_directory: Path = Field(..., description="Base directory for projects")
@@ -326,6 +348,28 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
 
+    @field_validator("platforms", mode="before")
+    @classmethod
+    def parse_platforms(cls, v: Any) -> List[str]:
+        """Parse comma-separated platform list."""
+        if isinstance(v, str):
+            return [p.strip().lower() for p in v.split(",") if p.strip()]
+        if isinstance(v, list):
+            return [str(p).strip().lower() for p in v]
+        return ["telegram"]
+
+    @field_validator("feishu_allowed_users", mode="before")
+    @classmethod
+    def parse_str_list(cls, v: Any) -> Optional[List[str]]:
+        """Parse comma-separated string lists."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        if isinstance(v, list):
+            return [str(s) for s in v]
+        return v  # type: ignore[no-any-return]
+
     @field_validator("allowed_users", "notification_chat_ids", mode="before")
     @classmethod
     def parse_int_list(cls, v: Any) -> Optional[List[int]]:
@@ -465,6 +509,34 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_cross_field_dependencies(self) -> "Settings":
         """Validate dependencies between fields."""
+        # Validate platform-specific requirements
+        valid_platforms = {"telegram", "feishu"}
+        for p in self.platforms:
+            if p not in valid_platforms:
+                raise ValueError(
+                    f"Unknown platform '{p}'. Must be one of: {valid_platforms}"
+                )
+
+        if "telegram" in self.platforms:
+            if not self.telegram_bot_token:
+                raise ValueError(
+                    "telegram_bot_token required when 'telegram' in platforms"
+                )
+            if not self.telegram_bot_username:
+                raise ValueError(
+                    "telegram_bot_username required when 'telegram' in platforms"
+                )
+
+        if "feishu" in self.platforms:
+            if not self.feishu_app_id:
+                raise ValueError(
+                    "feishu_app_id required when 'feishu' in platforms"
+                )
+            if not self.feishu_app_secret:
+                raise ValueError(
+                    "feishu_app_secret required when 'feishu' in platforms"
+                )
+
         # Check auth token requirements
         if self.enable_token_auth and not self.auth_token_secret:
             raise ValueError(
@@ -507,7 +579,16 @@ class Settings(BaseSettings):
     @property
     def telegram_token_str(self) -> str:
         """Get Telegram token as string."""
+        if not self.telegram_bot_token:
+            raise ValueError("telegram_bot_token not configured")
         return self.telegram_bot_token.get_secret_value()
+
+    @property
+    def feishu_app_secret_str(self) -> str:
+        """Get Feishu app secret as string."""
+        if not self.feishu_app_secret:
+            raise ValueError("feishu_app_secret not configured")
+        return self.feishu_app_secret.get_secret_value()
 
     @property
     def auth_secret_str(self) -> Optional[str]:

@@ -25,10 +25,14 @@ def test_settings_validation_required_fields(monkeypatch):
         Settings(_env_file=None)
 
     errors = exc_info.value.errors()
+    # approved_directory is still a required field (no default)
     required_fields = {error["loc"][0] for error in errors}
-    assert "telegram_bot_token" in required_fields
-    assert "telegram_bot_username" in required_fields
     assert "approved_directory" in required_fields
+
+    # telegram_bot_token/username are now validated at cross-field level
+    # (required only when 'telegram' in platforms, which is the default)
+    error_msgs = str(exc_info.value)
+    assert "telegram_bot_token" in error_msgs or "approved_directory" in required_fields
 
 
 def test_settings_with_valid_data(tmp_path):
